@@ -1,0 +1,548 @@
+
+
+===== FILE: D:\projects\SyncFlix\templates\base.html =====
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SyncVideo</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        video { width: 100%; background: #000; }
+        .controls { margin: 10px 0; }
+        button { padding: 8px 16px; margin: 5px; cursor: pointer; }
+        input { padding: 8px; margin: 5px; width: 200px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        {% block content %}{% endblock %}
+    </div>
+</body>
+</html>
+
+
+===== FILE: D:\projects\SyncFlix\templates\create.html =====
+
+{% extends "base.html" %}
+{% block content %}
+<div id="create-section">
+    <h2>Create Room</h2>
+    <form id="uploadForm">
+        <input type="file" id="videoFile" name="file" accept="video/*" required>
+        <button type="submit">Create Room</button>
+    </form>
+    <div id="status"></div>
+</div>
+
+<div id="player-section" style="display:none;">
+    <h2>Room Created! Share this room ID: <span id="room-id"></span></h2>
+    <video id="videoPlayer" controls style="width: 100%;"></video>
+    <div class="controls" style="margin: 10px 0;">
+        <button onclick="play()">Play</button>
+        <button onclick="pause()">Pause</button>
+        <span id="time">00:00</span>
+    </div>
+</div>
+
+<script>
+const socket = io();
+let currentRoomID = null;
+let currentFilename = null;
+
+document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fileInput = document.getElementById('videoFile');
+    const file = fileInput.files[0];
+    
+    if (!file) {
+        document.getElementById('status').textContent = 'Please select a video file';
+        return;
+    }
+    
+    document.getElementById('status').textContent = 'Uploading file...';
+    
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    try {
+        const response = await fetch('/upload', {
+            method: 'POST',
+            body: formData
+        });
+        
+        const result = await response.json();
+        
+        if (!response.ok) {
+            throw new Error(result.error || 'Upload failed');
+        }
+        
+        document.getElementById('status').textContent = 'Creating room...';
+        
+        // Create room - stay on same page!
+        socket.emit('create_room', {
+            video_hash: result.hash,
+            filename: result.filename
+        });
+        
+    } catch (error) {
+        document.getElementById('status').textContent = 'Error: ' + error.message;
+    }
+});
+
+socket.on('room_created', (data) => {
+    // Show player section instead of redirecting
+    currentRoomID = data.room_id;
+    currentFilename = data.filename;
+    
+    document.getElementById('room-id').textContent = data.room_id;
+    document.getElementById('create-section').style.display = 'none';
+    document.getElementById('player-section').style.display = 'block';
+    
+    // Load video
+    const video = document.getElementById('videoPlayer');
+    video.src = `/video/${encodeURIComponent(data.filename)}`;
+    
+    // Join the room we just created
+    socket.emit('join_room', {room_id: data.room_id});
+});
+
+socket.on('sync_state', (state) => {
+    const video = document.getElementById('videoPlayer');
+    video.currentTime = state.time;
+    if (state.paused) {
+        video.pause();
+    } else {
+        video.play().catch(e => console.log("Auto-play failed:", e));
+    }
+});
+
+socket.on('error', (data) => {
+    document.getElementById('status').textContent = 'Error: ' + data.message;
+});
+
+// Player controls
+function play() {
+    if (currentRoomID) {
+        socket.emit('control', {room_id: currentRoomID, action: 'play'});
+    }
+}
+
+function pause() {
+    if (currentRoomID) {
+        socket.emit('control', {room_id: currentRoomID, action: 'pause'});
+    }
+}
+
+// Add seek functionality
+document.getElementById('videoPlayer').addEventListener('seeked', function() {
+    if (currentRoomID) {
+        socket.emit('control', {room_id: currentRoomID, action: 'seek', time: this.currentTime});
+    }
+});
+
+document.getElementById('videoPlayer').addEventListener('timeupdate', function() {
+    document.getElementById('time').textContent = formatTime(this.currentTime);
+});
+
+function formatTime(seconds) {
+    const min = Math.floor(seconds / 60);
+    const sec = Math.floor(seconds % 60);
+    return `${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
+}
+</script>
+{% endblock %}
+
+
+===== FILE: D:\projects\SyncFlix\templates\index.html =====
+
+{% extends "base.html" %}
+{% block content %}
+<h1>SyncVideo</h1>
+<a href="/create"><button>Create Room</button></a>
+<a href="/join"><button>Join Room</button></a>
+{% endblock %}
+
+
+===== FILE: D:\projects\SyncFlix\templates\join.html =====
+
+{% extends "base.html" %}
+{% block content %}
+<div id="join-section">
+    <h2>Join Room</h2>
+    <form id="joinForm">
+        <input type="text" id="roomName" name="room_id" placeholder="Enter Room ID" required maxlength="10">
+        <input type="file" id="videoFile" name="file" accept="video/*" required>
+        <button type="submit">Join Room</button>
+    </form>
+    <div id="status"></div>
+</div>
+
+<div id="player-section" style="display:none;">
+    <h2>Connected to Room: <span id="room-id-display"></span></h2>
+    <video id="videoPlayer" controls style="width: 100%;"></video>
+    <div class="controls" style="margin: 10px 0;">
+        <button onclick="play()">Play</button>
+        <button onclick="pause()">Pause</button>
+        <span id="time">00:00</span>
+    </div>
+</div>
+
+<script>
+const socket = io();
+let currentRoomID = null;
+let currentFilename = null;
+
+document.getElementById('joinForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const roomName = document.getElementById('roomName').value.trim();
+    const fileInput = document.getElementById('videoFile');
+    const file = fileInput.files[0];
+    
+    if (!roomName || !file) {
+        document.getElementById('status').textContent = 'Please enter room ID and select a video file';
+        return;
+    }
+    
+    document.getElementById('status').textContent = 'Uploading file...';
+    
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    try {
+        const response = await fetch('/upload', {
+            method: 'POST',
+            body: formData
+        });
+        
+        const result = await response.json();
+        
+        if (!response.ok) {
+            throw new Error(result.error || 'Upload failed');
+        }
+        
+        currentRoomID = roomName;
+        currentFilename = result.filename;
+        
+        // Join room - stay on same page!
+        socket.emit('join_room', {room_id: roomName});
+        
+    } catch (error) {
+        document.getElementById('status').textContent = 'Error: ' + error.message;
+    }
+});
+
+socket.on('sync_state', (state) => {
+    document.getElementById('join-section').style.display = 'none';
+    document.getElementById('player-section').style.display = 'block';
+    document.getElementById('room-id-display').textContent = currentRoomID;
+    
+    const video = document.getElementById('videoPlayer');
+    video.src = `/video/${encodeURIComponent(currentFilename)}`;
+    
+    video.currentTime = state.time;
+    if (state.paused) {
+        video.pause();
+    } else {
+        video.play().catch(e => console.log("Auto-play failed:", e));
+    }
+});
+
+socket.on('error', (data) => {
+    document.getElementById('status').textContent = 'Error: ' + data.message;
+});
+
+// Player controls
+function play() {
+    if (currentRoomID) {
+        socket.emit('control', {room_id: currentRoomID, action: 'play'});
+    }
+}
+
+function pause() {
+    if (currentRoomID) {
+        socket.emit('control', {room_id: currentRoomID, action: 'pause'});
+    }
+}
+
+document.getElementById('videoPlayer').addEventListener('seeked', function() {
+    if (currentRoomID) {
+        socket.emit('control', {room_id: currentRoomID, action: 'seek', time: this.currentTime});
+    }
+});
+
+document.getElementById('videoPlayer').addEventListener('timeupdate', function() {
+    document.getElementById('time').textContent = formatTime(this.currentTime);
+});
+
+function formatTime(seconds) {
+    const min = Math.floor(seconds / 60);
+    const sec = Math.floor(seconds % 60);
+    return `${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
+}
+</script>
+{% endblock %}
+
+
+===== FILE: D:\projects\SyncFlix\templates\player.html =====
+
+{% extends "base.html" %}
+{% block content %}
+<div id="loading">Connecting to room...</div>
+<video id="videoPlayer" controls style="display:none; width: 100%;"></video>
+<div class="controls" style="display:none; margin: 10px 0;">
+    <button onclick="play()">Play</button>
+    <button onclick="pause()">Pause</button>
+    <span id="time">00:00</span>
+</div>
+<div id="error" style="color: red; display: none;"></div>
+
+<script>
+const roomID = "{{ room_id }}";
+const urlParams = new URLSearchParams(window.location.search);
+const filename = urlParams.get('file');
+const socket = io();
+const video = document.getElementById('videoPlayer');
+const loading = document.getElementById('loading');
+const controls = document.querySelector('.controls');
+const errorDiv = document.getElementById('error');
+
+if (!filename) {
+    showError('Video file not specified in URL');
+} else {
+    const decodedFilename = decodeURIComponent(filename);
+    video.src = `/video/${decodedFilename}`;
+    
+    // Check if video loads
+    video.onerror = () => {
+        showError('Video file not found on server. Make sure both users uploaded the same file.');
+    };
+}
+
+// Join the room
+socket.emit('join_room', {room_id: roomID});
+
+socket.on('sync_state', (state) => {
+    loading.style.display = 'none';
+    video.style.display = 'block';
+    controls.style.display = 'block';
+    
+    video.currentTime = state.time;
+    if (state.paused) {
+        video.pause();
+    } else {
+        video.play().catch(e => console.log("Auto-play failed:", e));
+    }
+});
+
+socket.on('error', (data) => {
+    showError(data.message);
+});
+
+function showError(message) {
+    loading.style.display = 'none';
+    errorDiv.textContent = message;
+    errorDiv.style.display = 'block';
+}
+
+// Local controls
+function play() {
+    socket.emit('control', {room_id: roomID, action: 'play'});
+}
+
+function pause() {
+    socket.emit('control', {room_id: roomID, action: 'pause'});
+}
+
+video.addEventListener('seeked', () => {
+    socket.emit('control', {room_id: roomID, action: 'seek', time: video.currentTime});
+});
+
+video.addEventListener('timeupdate', () => {
+    document.getElementById('time').textContent = formatTime(video.currentTime);
+});
+
+function formatTime(seconds) {
+    const min = Math.floor(seconds / 60);
+    const sec = Math.floor(seconds % 60);
+    return `${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
+}
+</script>
+{% endblock %}
+
+
+===== FILE: D:\projects\SyncFlix\app.py =====
+
+import os
+import hashlib
+import secrets
+from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask_socketio import SocketIO, join_room, leave_room, emit
+import threading
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'your-secret-key-here'
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+# In-memory storage
+rooms = {}
+room_locks = {}
+
+def get_file_hash(filepath):
+    """Calculate SHA-256 hash of a file"""
+    if not os.path.exists(filepath):
+        return None
+    hash_sha256 = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            hash_sha256.update(chunk)
+    return hash_sha256.hexdigest()
+
+def generate_room_id():
+    """Generate a unique 8-character room ID"""
+    return secrets.token_urlsafe(6)
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/create')
+def create_room():
+    return render_template('create.html')
+
+@app.route('/join')
+def join_room_page():
+    return render_template('join.html')
+
+@app.route('/room/<room_id>')
+def room_player(room_id):
+    return render_template('player.html', room_id=room_id)
+
+@app.route('/video/<path:filename>')
+def serve_video(filename):
+    """Serve video files from local storage"""
+    try:
+        return send_from_directory('videos', filename)
+    except FileNotFoundError:
+        return "Video file not found", 404
+
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    """Handle file upload to videos directory"""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+    
+    # Save file to videos directory
+    os.makedirs('videos', exist_ok=True)
+    filepath = os.path.join('videos', file.filename)
+    file.save(filepath)
+    
+    # Calculate hash
+    file_hash = get_file_hash(filepath)
+    if file_hash is None:
+        return jsonify({'error': 'Failed to save file'}), 500
+    
+    return jsonify({
+        'filename': file.filename,
+        'hash': file_hash
+    })
+
+@socketio.on('create_room')
+def handle_create_room(data):
+    room_id = generate_room_id()
+    video_hash = data['video_hash']
+    filename = data['filename']
+    
+    # Ensure uniqueness
+    while room_id in rooms:
+        room_id = generate_room_id()
+    
+    rooms[room_id] = {
+        'host_sid': request.sid,
+        'client_sid': None,
+        'video_hash': video_hash,
+        'filename': filename,
+        'state': {'time': 0, 'paused': True}
+    }
+    room_locks[room_id] = threading.Lock()
+    join_room(room_id)
+    
+    print(f"Room created: {room_id} by {request.sid}")
+    emit('room_created', {'room_id': room_id, 'filename': filename})
+
+@socketio.on('join_room')
+def handle_join_room(data):
+    room_id = data['room_id']
+    print(f"Join attempt for room: {room_id} by {request.sid}")
+    print(f"Available rooms: {list(rooms.keys())}")
+    
+    if room_id not in rooms:
+        emit('error', {'message': f'Room {room_id} not found. Available rooms: {list(rooms.keys())}'})
+        return
+    
+    with room_locks[room_id]:
+        if rooms[room_id]['client_sid'] is not None:
+            emit('error', {'message': 'Room is full'})
+            return
+        
+        rooms[room_id]['client_sid'] = request.sid
+        join_room(room_id)
+        
+        print(f"User {request.sid} joined room {room_id}")
+        emit('sync_state', rooms[room_id]['state'], room=request.sid)
+        emit('peer_joined', room=rooms[room_id]['host_sid'])
+
+@socketio.on('control')
+def handle_control(data):
+    room_id = data['room_id']
+    action = data['action']
+    
+    if room_id not in rooms:
+        return
+    
+    with room_locks[room_id]:
+        if action == 'play':
+            rooms[room_id]['state']['paused'] = False
+        elif action == 'pause':
+            rooms[room_id]['state']['paused'] = True
+        elif action == 'seek':
+            rooms[room_id]['state']['time'] = data['time']
+        
+        # Broadcast to other user
+        target_sid = None
+        if request.sid == rooms[room_id]['host_sid']:
+            target_sid = rooms[room_id]['client_sid']
+        else:
+            target_sid = rooms[room_id]['host_sid']
+        
+        if target_sid:
+            emit('sync_state', rooms[room_id]['state'], room=target_sid)
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    sid = request.sid
+    print(f"User disconnected: {sid}")
+    for room_id, room_data in list(rooms.items()):
+        if room_data['host_sid'] == sid or room_data['client_sid'] == sid:
+            if room_data['host_sid'] == sid:
+                room_data['host_sid'] = None
+                print(f"Host left room {room_id}")
+            if room_data['client_sid'] == sid:
+                room_data['client_sid'] = None
+                print(f"Client left room {room_id}")
+            
+            if room_data['host_sid'] is None and room_data['client_sid'] is None:
+                del rooms[room_id]
+                del room_locks[room_id]
+                print(f"Room {room_id} deleted")
+
+if __name__ == '__main__':
+    os.makedirs('videos', exist_ok=True)
+    print("Starting server... Make sure your video files are in the 'videos' directory")
+    socketio.run(app, debug=True, allow_unsafe_werkzeug=True)

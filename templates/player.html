@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block content %}
+<div id="loading">Connecting to room...</div>
+<video id="videoPlayer" controls style="display:none; width: 100%;"></video>
+<div class="controls" style="display:none; margin: 10px 0;">
+    <button onclick="play()">Play</button>
+    <button onclick="pause()">Pause</button>
+    <span id="time">00:00</span>
+</div>
+<div id="error" style="color: red; display: none;"></div>
+
+<script>
+const roomID = "{{ room_id }}";
+const urlParams = new URLSearchParams(window.location.search);
+const filename = urlParams.get('file');
+const socket = io();
+const video = document.getElementById('videoPlayer');
+const loading = document.getElementById('loading');
+const controls = document.querySelector('.controls');
+const errorDiv = document.getElementById('error');
+
+if (!filename) {
+    showError('Video file not specified in URL');
+} else {
+    const decodedFilename = decodeURIComponent(filename);
+    video.src = `/video/${decodedFilename}`;
+    
+    // Check if video loads
+    video.onerror = () => {
+        showError('Video file not found on server. Make sure both users uploaded the same file.');
+    };
+}
+
+// Join the room
+socket.emit('join_room', {room_id: roomID});
+
+socket.on('sync_state', (state) => {
+    loading.style.display = 'none';
+    video.style.display = 'block';
+    controls.style.display = 'block';
+    
+    video.currentTime = state.time;
+    if (state.paused) {
+        video.pause();
+    } else {
+        video.play().catch(e => console.log("Auto-play failed:", e));
+    }
+});
+
+socket.on('error', (data) => {
+    showError(data.message);
+});
+
+function showError(message) {
+    loading.style.display = 'none';
+    errorDiv.textContent = message;
+    errorDiv.style.display = 'block';
+}
+
+// Local controls
+function play() {
+    socket.emit('control', {room_id: roomID, action: 'play'});
+}
+
+function pause() {
+    socket.emit('control', {room_id: roomID, action: 'pause'});
+}
+
+video.addEventListener('seeked', () => {
+    socket.emit('control', {room_id: roomID, action: 'seek', time: video.currentTime});
+});
+
+video.addEventListener('timeupdate', () => {
+    document.getElementById('time').textContent = formatTime(video.currentTime);
+});
+
+function formatTime(seconds) {
+    const min = Math.floor(seconds / 60);
+    const sec = Math.floor(seconds % 60);
+    return `${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
+}
+</script>
+{% endblock %}

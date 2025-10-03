@@ -1,0 +1,10 @@
+body {
+  background-color: #121212;
+}
+video {
+  background: black;
+}
+#chatBox .chat-line {
+  margin: 2px 0;
+  font-size: 0.9rem;
+}

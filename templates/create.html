@@ -1,0 +1,253 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card bg-secondary bg-opacity-10 border-0 shadow-lg">
+  <div class="card-body">
+    <h3 class="fw-bold mb-4">Create a Room</h3>
+    <form id="uploadForm" class="row g-2 align-items-center mb-3">
+      <div class="col-sm-8">
+        <input type="file" id="videoFile" class="form-control" accept="video/*" required>
+      </div>
+      <div class="col-sm-4 d-grid">
+        <button type="submit" class="btn btn-success">Create & Host</button>
+      </div>
+    </form>
+    <p id="status" class="text-muted"></p>
+
+    <div id="playerWrap" class="mt-4" style="display:none;">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <div class="fw-semibold">Room ID: <span id="room-id" class="text-success"></span></div>
+        <button id="copyRoom" class="btn btn-sm btn-outline-light">Copy</button>
+      </div>
+
+      <video id="videoPlayer" controls class="w-100 rounded shadow-sm mb-2"></video>
+
+      <div class="d-flex align-items-center gap-2 mb-3">
+        <button class="btn btn-outline-success" onclick="document.getElementById('videoPlayer').play()">▶ Play</button>
+        <button class="btn btn-outline-danger" onclick="document.getElementById('videoPlayer').pause()">⏸ Pause</button>
+        <span id="time" class="ms-auto small text-muted">00:00</span>
+      </div>
+
+      <div class="row g-3">
+        <!-- Video Chat -->
+        <div class="col-md-6">
+          <div class="p-3 bg-dark rounded shadow-sm h-100">
+            <h5 class="mb-3">Video Chat</h5>
+            <video id="localVideo" autoplay playsinline muted class="w-100 mb-2 rounded bg-black"></video>
+            <video id="remoteVideo" autoplay playsinline class="w-100 rounded bg-black"></video>
+            <div class="d-flex gap-2 mt-2">
+              <button id="toggleCam" class="btn btn-sm btn-outline-light">Toggle Cam</button>
+              <button id="toggleMic" class="btn btn-sm btn-outline-light">Mute</button>
+            </div>
+          </div>
+        </div>
+        <!-- Chat -->
+        <div class="col-md-6">
+          <div class="p-3 bg-dark rounded shadow-sm h-100 d-flex flex-column">
+            <h5 class="mb-3">Chat</h5>
+            <div id="chatBox" class="flex-grow-1 bg-black rounded p-2 overflow-auto mb-2" style="height:200px;"></div>
+            <div class="input-group">
+              <input id="chatInput" class="form-control" placeholder="Message...">
+              <button id="sendChat" class="btn btn-success">Send</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- <script src="{{ url_for('static', filename='create.js') }}"></script> -->
+
+
+<script>
+/*  CREATE PAGE JS
+    - local video playback (objectURL)
+    - calculate SHA256 via SubtleCrypto
+    - socket signaling and chat + WebRTC glue
+    - periodic host heartbeat (state_update)
+*/
+const socket = io();
+let currentRoomID = null;
+let localStream = null;
+let peerConnection = null;
+let isCamOn = true;
+let isMicOn = true;
+const STUN_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+async function calculateHash(file) {
+  const buffer = await file.arrayBuffer();
+  const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+  return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
+document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const file = document.getElementById('videoFile').files[0];
+  if (!file) return;
+  document.getElementById('status').textContent = 'Calculating hash...';
+  const hash = await calculateHash(file);
+  document.getElementById('status').textContent = 'Creating room...';
+  socket.emit('create_room', { video_hash: hash, filename: file.name });
+
+  const video = document.getElementById('videoPlayer');
+  video.src = URL.createObjectURL(file);
+});
+
+socket.on('room_created', (data) => {
+  currentRoomID = data.room_id;
+  document.getElementById('room-id').textContent = currentRoomID;
+  document.getElementById('uploadForm').style.display = 'none';
+  document.getElementById('playerWrap').style.display = 'block';
+  document.getElementById('status').textContent = 'Waiting for peer to join...';
+});
+
+// Sync play/pause/seek from other
+socket.on('sync_state', (state) => {
+  const video = document.getElementById('videoPlayer');
+  video.isRemoteUpdate = true;
+  if (Math.abs(video.currentTime - state.time) > 0.3) {
+    video.currentTime = state.time;
+  }
+  if (state.paused) video.pause(); else video.play().catch(()=>{});
+  setTimeout(()=>video.isRemoteUpdate = false, 200);
+});
+
+socket.on('peer_joined', () => {
+  document.getElementById('status').textContent = 'Peer joined — starting call...';
+});
+
+socket.on('ready_for_call', () => {
+  // host will start camera & create offer
+  startCamera().then(()=>prepareCall(true));
+});
+
+socket.on('error', (d)=>{ document.getElementById('status').textContent = '❌ ' + d.message; });
+
+// Chat
+document.getElementById('sendChat').addEventListener('click', ()=>{
+  const msg = document.getElementById('chatInput').value.trim();
+  if (!msg || !currentRoomID) return;
+  socket.emit('chat_message', { room_id: currentRoomID, message: msg });
+  document.getElementById('chatInput').value = '';
+});
+socket.on('chat_message', (d)=>{
+  const box = document.getElementById('chatBox');
+  const el = document.createElement('div');
+  el.className = 'chat-line';
+  el.textContent = (d.sender === undefined ? 'Server' : (d.sender === socket.id ? 'You' : 'Peer')) + ': ' + d.message;
+  box.appendChild(el);
+  box.scrollTop = box.scrollHeight;
+});
+
+// copy room id
+document.getElementById('copyRoom').addEventListener('click', ()=>{
+  navigator.clipboard.writeText(currentRoomID).then(()=>{ alert('Room ID copied'); });
+});
+
+// Video element events (host)
+const videoEl = document.getElementById('videoPlayer');
+videoEl.addEventListener('play', function(){
+  if (!this.isRemoteUpdate && currentRoomID) {
+    socket.emit('control', { room_id: currentRoomID, action: 'play', time: this.currentTime });
+  }
+});
+videoEl.addEventListener('pause', function(){
+  if (!this.isRemoteUpdate && currentRoomID) {
+    socket.emit('control', { room_id: currentRoomID, action: 'pause', time: this.currentTime });
+  }
+});
+videoEl.addEventListener('seeked', function(){
+  if (!this.isRemoteUpdate && currentRoomID) {
+    socket.emit('control', { room_id: currentRoomID, action: 'seek', time: this.currentTime });
+  }
+});
+videoEl.addEventListener('timeupdate', function(){
+  document.getElementById('time').textContent = formatTime(this.currentTime);
+});
+
+// Periodic host heartbeat to reduce drift (host sends to server)
+let heartbeatInterval = null;
+function startHeartbeat() {
+  if (heartbeatInterval) clearInterval(heartbeatInterval);
+  heartbeatInterval = setInterval(()=>{
+    if (!currentRoomID) return;
+    const v = document.getElementById('videoPlayer');
+    socket.emit('state_update', { room_id: currentRoomID, time: v.currentTime, paused: v.paused });
+  }, 2000);
+}
+function stopHeartbeat() {
+  if (heartbeatInterval) clearInterval(heartbeatInterval);
+}
+
+// WebRTC functions
+async function startCamera() {
+  if (localStream) return;
+  localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+  document.getElementById('localVideo').srcObject = localStream;
+}
+
+async function prepareCall(isInitiator) {
+  peerConnection = new RTCPeerConnection(STUN_CONFIG);
+  // attach local tracks
+  localStream.getTracks().forEach(t => peerConnection.addTrack(t, localStream));
+  peerConnection.ontrack = (ev) => {
+    document.getElementById('remoteVideo').srcObject = ev.streams[0];
+  };
+  peerConnection.onicecandidate = (ev) => {
+    if (ev.candidate && currentRoomID) {
+      socket.emit('ice_candidate', { room_id: currentRoomID, candidate: ev.candidate });
+    }
+  };
+
+  socket.on('offer', async (data)=>{
+    if (data.room_id !== currentRoomID) return;
+    if (!peerConnection) await prepareCall(false);
+    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+    const answer = await peerConnection.createAnswer();
+    await peerConnection.setLocalDescription(answer);
+    socket.emit('answer', { room_id: currentRoomID, answer });
+  });
+
+  socket.on('answer', async (data)=>{
+    if (data.room_id !== currentRoomID) return;
+    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+  });
+
+  socket.on('ice_candidate', async (data)=>{
+    if (data.room_id !== currentRoomID) return;
+    try {
+      await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+    } catch (e) {
+      console.warn('ICE add failed', e);
+    }
+  });
+
+  if (isInitiator) {
+    const offer = await peerConnection.createOffer();
+    await peerConnection.setLocalDescription(offer);
+    socket.emit('offer', { room_id: currentRoomID, offer });
+    // host starts heartbeat
+    startHeartbeat();
+  }
+}
+
+// toggles
+document.getElementById('toggleCam').addEventListener('click', ()=>{
+  if (!localStream) return;
+  isCamOn = !isCamOn;
+  localStream.getVideoTracks().forEach(t => t.enabled = isCamOn);
+  document.getElementById('toggleCam').textContent = isCamOn ? 'Turn Cam Off' : 'Turn Cam On';
+});
+document.getElementById('toggleMic').addEventListener('click', ()=>{
+  if (!localStream) return;
+  isMicOn = !isMicOn;
+  localStream.getAudioTracks().forEach(t => t.enabled = isMicOn);
+  document.getElementById('toggleMic').textContent = isMicOn ? 'Mute' : 'Unmute';
+});
+
+// utils
+function formatTime(s){
+  const mm = Math.floor(s/60), ss = Math.floor(s%60);
+  return `${mm.toString().padStart(2,'0')}:${ss.toString().padStart(2,'0')}`;
+}
+</script>
+{% endblock %}
